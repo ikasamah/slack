@@ -669,3 +669,113 @@ func (api *Client) UploadFileV2Context(ctx context.Context, params UploadFileV2P
 
 	return &c.Files[0], nil
 }
+
+
+// Multiple files upload support
+
+type FileV2Parameters struct {
+	File        string
+	FileSize    int
+	Content     string
+	Reader      io.Reader
+	Filename    string
+	Title       string
+	AltTxt      string
+	SnippetText string
+}
+
+type UploadMultipleFilesV2Parameters struct {
+	Files           []FileV2Parameters
+	InitialComment  string
+	Channel         string
+	ThreadTimestamp string
+}
+
+// UploadMultipleFilesV2 uploads multiple files in a single post
+func (api *Client) UploadMultipleFilesV2(params UploadMultipleFilesV2Parameters) ([]FileSummary, error) {
+	return api.UploadMultipleFilesV2Context(context.Background(), params)
+}
+
+// UploadMultipleFilesV2Context uploads multiple files in a single post with context
+func (api *Client) UploadMultipleFilesV2Context(ctx context.Context, params UploadMultipleFilesV2Parameters) (files []FileSummary, err error) {
+	summaries := make([]*FileSummary, len(params.Files))
+	
+	// Step 1: Get upload URLs for all files
+	for i, fileParam := range params.Files {
+		if fileParam.Filename == "" {
+			return nil, fmt.Errorf("file.upload.v2: filename cannot be empty")
+		}
+		if fileParam.FileSize == 0 {
+			return nil, fmt.Errorf("file.upload.v2: file size cannot be 0")
+		}
+
+		u, err := api.GetUploadURLExternalContext(ctx, GetUploadURLExternalParameters{
+			AltTxt:      fileParam.AltTxt,
+			FileName:    fileParam.Filename,
+			FileSize:    fileParam.FileSize,
+			SnippetType: fileParam.SnippetText,
+		})
+		if err != nil {
+			return nil, err
+		}
+		summaries[i] = &FileSummary{ID: u.FileID, Title: fileParam.Title}
+
+		// Step 2: Upload file to the URL
+		err = api.UploadToURL(ctx, UploadToURLParameters{
+			UploadURL: u.UploadURL,
+			Reader:    fileParam.Reader,
+			File:      fileParam.File,
+			Content:   fileParam.Content,
+			Filename:  fileParam.Filename,
+		})
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	// Step 3: Complete all uploads in a single request
+	c, err := api.completeMultipleUploadExternal(ctx, summaries, CompleteUploadExternalParameters{
+		Channel:         params.Channel,
+		InitialComment:  params.InitialComment,
+		ThreadTimestamp: params.ThreadTimestamp,
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	return c.Files, nil
+}
+
+// completeMultipleUploadExternal completes multiple file uploads and shares them in a single post
+func (api *Client) completeMultipleUploadExternal(ctx context.Context, fs []*FileSummary, params CompleteUploadExternalParameters) (*CompleteUploadExternalResponse, error) {
+	requestBytes, err := json.Marshal(fs)
+	if err != nil {
+		return nil, err
+	}
+	
+	values := url.Values{
+		"token": {api.token},
+		"files": {string(requestBytes)},
+	}
+
+	if params.Channel != "" {
+		values.Add("channel_id", params.Channel)
+	}
+	if params.InitialComment != "" {
+		values.Add("initial_comment", params.InitialComment)
+	}
+	if params.ThreadTimestamp != "" {
+		values.Add("thread_ts", params.ThreadTimestamp)
+	}
+	
+	response := &CompleteUploadExternalResponse{}
+	err = api.postMethod(ctx, "files.completeUploadExternal", values, response)
+	if err != nil {
+		return nil, err
+	}
+	if response.Err() != nil {
+		return nil, response.Err()
+	}
+	return response, nil
+}
+
